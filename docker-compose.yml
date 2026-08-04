@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # CouchDB: Banco de Dados de Estado, Metadados e Ativações (Histórico de Execuções)
+  # ----------------------------------------------------------------------------
+  couchdb:
+    image: couchdb:3.3.2
+    container_name: openwhisk_couchdb
+    environment:
+      - COUCHDB_USER=${COUCHDB_USER:-admin}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD:-secret-admin-password}
+    ports:
+      - "${COUCHDB_PORT:-5984}:5984"
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+    networks:
+      - openwhisk_network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # ZooKeeper: Coordenação de Cluster para o Kafka
+  # ----------------------------------------------------------------------------
+  zookeeper:
+    image: zookeeper:3.8.0
+    container_name: openwhisk_zookeeper
+    ports:
+      - "${ZOOKEEPER_PORT:-2181}:2181"
+    networks:
+      - openwhisk_network
+    restart: always
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # Apache Kafka: Barramento de Eventos de Execuções/Ativações para os Invokers
+  # ----------------------------------------------------------------------------
+  kafka:
+    image: wurstmeister/kafka:2.13-2.8.1
+    container_name: openwhisk_kafka
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "completed-activations:1:1,invoker0:1:1,health:1:1"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks:
+      - openwhisk_network
+    restart: always
+
+  # ----------------------------------------------------------------------------
+  # OpenWhisk Controller: Orquestrador da API, Autenticação e Agendamento
+  # ----------------------------------------------------------------------------
+  controller:
+    image: openwhisk/controller:latest
+    container_name: openwhisk_controller
+    ports:
+      - "8888:8888"
+    environment:
+      - COUCHDB_USER=${COUCHDB_USER:-admin}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD:-secret-admin-password}
+      - COUCHDB_HOST=couchdb
+      - COUCHDB_PORT=5984
+      - KAFKA_HOSTS=kafka:9092
+      - ZOOKEEPER_HOSTS=zookeeper:2181
+      - LIMITS_ACTIONS_TIMEOUT=${LIMITS_ACTIONS_TIMEOUT_MS:-15000}
+      - LIMITS_ACTIONS_MEMORY=${LIMITS_ACTIONS_MEMORY_MB:-256}
+      - LIMITS_ACTIONS_CONCURRENCY=${LIMITS_ACTIONS_CONCURRENCY:-100}
+      - AUTH_KEY=${AUTH_KEY:-23bc46b1-71f6-4ed5-8c54-816aa4f8c502:123zO3xZCLrMN6v2BKK1dQMUIg3Yxuv31623G7vS3Ym6e159yG}
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - openwhisk_network
+    restart: always
+
+  # ----------------------------------------------------------------------------
+  # OpenWhisk Invoker: Container Pool Engine e Gerenciador de Ciclo de Vida do Docker
+  # ----------------------------------------------------------------------------
+  invoker:
+    image: openwhisk/invoker:latest
+    container_name: openwhisk_invoker
+    ports:
+      - "8085:8085"
+    environment:
+      - COUCHDB_USER=${COUCHDB_USER:-admin}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD:-secret-admin-password}
+      - COUCHDB_HOST=couchdb
+      - COUCHDB_PORT=5984
+      - KAFKA_HOSTS=kafka:9092
+      - ZOOKEEPER_HOSTS=zookeeper:2181
+      - INVOKER_NAME=invoker0
+      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-docker.io}
+      - DOCKER_HOST=${OW_INVOKER_DOCKER_ENDPOINT:-unix:///var/run/docker.sock}
+    volumes:
+      # Permite ao Invoker criar/gerenciar containers Docker vizinhos (Container Pool Engine)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /sys/fs/cgroup:/sys/fs/cgroup
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - openwhisk_network
+    restart: always
+
+  # ----------------------------------------------------------------------------
+  # NGINX: API Gateway com Terminação SSL e Roteamento de Rotas
+  # ----------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.25.3-alpine
+    container_name: openwhisk_nginx
+    ports:
+      - "${API_GATEWAY_PORT_HTTP:-80}:80"
+      - "${API_GATEWAY_PORT_HTTPS:-443}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - controller
+    networks:
+      - openwhisk_network
+    restart: always
+
+networks:
+  openwhisk_network:
+    name: openwhisk_network
+    driver: bridge
+
+volumes:
+  couchdb_data:
+    driver: local

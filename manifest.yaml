@@ -1,0 +1,78 @@
+# ==============================================================================
+# OPENWHISK DEPLOYMENT MANIFEST (wskdeploy IaC Blueprint)
+# ==============================================================================
+
+# Definição do Projeto Global
+project:
+  name: EnterpriseServerlessCore
+  version: 1.0.0
+  license: Apache-2.0
+
+  # Definição do Pacote Corporativo
+  packages:
+    data-pipeline:
+      # Descrição e metadados organizacionais
+      displayName: "Pacote Corporativo de Pipeline de Dados FaaS"
+      description: "Pacote contendo o fluxo serverless de processamento e enriquecimento de cargas JSON."
+
+      # Parâmetros globais aplicados a todas as ações contidas neste pacote
+      inputs:
+        pipeline_version: "v3.0.0-release"
+        environment: "production"
+
+      # Definição das Serverless Actions contidas no pacote
+      actions:
+        # 1. Action em Go: Validação e Criptografia
+        validate-hash:
+          function: actions/go/main.go
+          runtime: go:1.17 # Runtime padrão do OpenWhisk Go Docker Engine
+          description: "Action Go de alta performance para validação estruturada e cálculo de hashes criptográficos."
+          # Limites de Recursos (FinOps e Gerenciamento de Memória)
+          limits:
+            timeout: 15000 # Tempo limite em Milissegundos (15 segundos)
+            memory: 128    # Limite máximo de memória em Megabytes (128 MB)
+          inputs:
+            default_file_name: "import_buffer.txt"
+
+        # 2. Action em Python: Transformação e Consumo de API
+        enrich-metadata:
+          function: actions/python/main.py
+          runtime: python:3 # Runtime padrão do OpenWhisk Python Engine
+          description: "Action Python para normalização de textos, transformação e enriquecimento de dados via API externa."
+          # Limites de Recursos
+          limits:
+            timeout: 15000 # Tempo limite em Milissegundos (15 segundos)
+            memory: 256    # Limite máximo de memória em Megabytes (256 MB)
+
+        # 3. Sequence Action: Encadeamento nativo do Pipeline Serverless
+        # A saída JSON do validate-hash serve como a entrada JSON do enrich-metadata
+        data-sequence-pipeline:
+          sequence: validate-hash, enrich-metadata
+          description: "Sequence Action de processamento unificado: Go Action (Cálculo Hashes) -> Python Action (Enriquecimento)."
+
+      # Definição de Triggers (Gatilhos de Eventos)
+      triggers:
+        # Gatilho temporal (Cron Job / Alarm) simulando disparos em lotes automáticos
+        every-minute-trigger:
+          feed: /whisk.system/alarms/alarm
+          inputs:
+            cron: "*/1 * * * *" # Executar a cada 1 minuto
+            trigger_payload:
+              payload: "Dados de auditoria temporal automática gerada pelo cron-job do sistema."
+              file_name: "cron_audit_report.json"
+
+        # Gatilho de Webhook externo (Chamadas HTTPS diretas)
+        webhook-ingestion-trigger:
+          description: "Gatilho ativado por integrações de webhooks externos de pipelines CI/CD."
+
+      # Definição de Rules (Regras que ligam Triggers a Actions/Sequences)
+      rules:
+        # Regra ligando o disparo do Cron temporal ao Pipeline de Sequência Unificado
+        execute-pipeline-rule:
+          trigger: every-minute-trigger
+          action: data-sequence-pipeline
+
+        # Regra ligando o Webhook de Ingestão diretamente à primeira Action do fluxo (Go)
+        webhook-to-go-validation-rule:
+          trigger: webhook-ingestion-trigger
+          action: validate-hash
