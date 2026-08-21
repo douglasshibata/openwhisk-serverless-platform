@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ----------------------------------------------------------------------------
   # CouchDB: Banco de Dados de Estado, Metadados e Ativações (Histórico de Execuções)
